@@ -49,30 +49,44 @@ This script reads Calibre's metadata database to accurately organize books by se
 - ✅ **Author filtering**: Migrate specific authors only
 - ✅ **Cross-platform**: Works on Windows, macOS, and Linux
 - ✅ **Safe migration**: Preserves original files, copies to new location
+- ✅ **Virtual Filesystem (NEW)**: Mount your library as a virtual drive using FUSE (Linux only, zero disk space used!)
 
 ## Requirements
 
 - Python 3.6 or higher
 - Access to a Calibre library folder
 - Destination folder for Komga library
+- `fusepy` (for the optional FUSE mount feature)
 
 ## Installation
 
-1. Download the `calibre2komga.py` script
+1. Download the script files (`calibre2komga.py`, `calibre_core.py`, etc.)
 2. Ensure Python 3.6+ is installed on your system
-3. No additional dependencies required (uses Python standard library only)
+3. For the FUSE mount feature, install dependencies: `pip install fusepy`
 
 ## Usage
 
-### Basic Migration
+### Option A: Virtual FUSE Mount (Zero Disk Space) - Recommended for Linux
+This "tricks" Komga into thinking the files are in its preferred structure without actually copying them.
+
 ```bash
-python calibre2komga.py /path/to/calibre/library /path/to/komga/library
+# Basic mount
+python3 calibre2komga.py mount /path/to/calibre /mnt/komga_virtual
+
+# For Docker support (requires editing /etc/fuse.conf)
+python3 calibre2komga.py mount /path/to/calibre /mnt/komga_virtual --allow-other
+```
+See [USAGE_FUSE.md](./USAGE_FUSE.md) for detailed instructions on backgrounding and permissions.
+
+### Option B: Basic Migration (Copying Files)
+```bash
+python3 calibre2komga.py export /path/to/calibre /path/to/komga
 ```
 
-### Dry Run (Recommended First)
+### Dry Run (Recommended First for Export)
 Preview what will be migrated without making any changes:
 ```bash
-python calibre2komga.py /path/to/calibre/library /path/to/komga/library --dry-run
+python3 calibre2komga.py export /path/to/calibre /path/to/komga --dry-run
 ```
 
 ### Migrate Specific Author
