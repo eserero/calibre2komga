@@ -1,3 +1,16 @@
+# 🚀 calibre2komga (eserero fork) - Virtual Filesystem Support
+
+This fork of `calibre2komga` adds a powerful **Virtual Filesystem (FUSE)** feature. Instead of copying thousands of files and wasting disk space, this tool can "mount" your Calibre library into a format that Komga understands perfectly.
+
+### 🌟 Key Enhancements in this Fork:
+- **Zero-Copy Mirroring**: Use FUSE to expose your Calibre library to Komga without duplicating a single byte.
+- **Modular Architecture**: Refactored for better maintenance and separate components for database parsing, exporting, and mounting.
+- **Docker Ready**: Includes specific support for `--allow-other` and clear instructions for Docker/Ubuntu environments.
+
+**[👉 Read the FUSE Setup & Mount Guide (USAGE_FUSE.md)](./USAGE_FUSE.md)**
+
+---
+
 # calibre2komga, a Calibre to Komga Migration Script
 
 While I like Calibre (and still plan to use it for ingesting books), I grew dissatisfied with Calibre-Web (and Calibre-Web-Automated).  I liked Komga and wanted to switch, but didn't want to spend time painfully migrating my library to the structure Komga likes.  So I asked my buddy Claude(.ai) to help me write a migration script.  After some back and forth and tweaks, this is the result.  So yes, it's 100% AI coded, but 1) it's non-desctructive to your Calibre library and 2) it's at least been tested by me a bit.  That being said, if you see something/run into issues, by all means raise an issue and we'll work on it.
