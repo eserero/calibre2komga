@@ -41,28 +41,25 @@ class CalibreKomgaExporter:
             self.stats['skipped_books'] += 1
             return False
 
-        series_folder = self.store.get_series_folder_name(metadata)
-        series_path = self.komga_path / series_folder
-
-        series_info = ""
-        if metadata.get('series'):
-            series_info = f" (Series: {metadata['series']}"
-            if metadata.get('series_index'):
-                series_info += f", Index: {metadata['series_index']}"
-            series_info += ")"
-            
-        logger.info(f"Migrating: {metadata['author']}/{metadata['title']}{series_info} -> {series_folder}/")
-        
         if not self.dry_run:
             try:
-                series_path.mkdir(parents=True, exist_ok=True)
                 for ebook_file in ebook_files:
-                    new_filename = self.store.get_file_name(metadata, ebook_file.name)
-                    dest_file = series_path / new_filename
+                    # Get virtual segments for the new path structure
+                    segments = self.store.get_virtual_segments(metadata, ebook_file.name)
+                    
+                    # Construct destination path
+                    dest_file = self.komga_path.joinpath(*segments)
+                    
+                    # Create parent directories
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                    
                     if dest_file.exists():
                         logger.warning(f"File already exists, skipping: {dest_file}")
                         continue
+                    
+                    logger.info(f"Migrating: {metadata['author']}/{metadata['title']} -> {Path(*segments)}")
                     shutil.copy2(ebook_file, dest_file)
+                
                 self.stats['migrated_books'] += 1
                 return True
             except Exception as e:
@@ -71,8 +68,8 @@ class CalibreKomgaExporter:
                 return False
         else:
             for ebook_file in ebook_files:
-                new_filename = self.store.get_file_name(metadata, ebook_file.name)
-                logger.info(f"[DRY RUN] Would create: {series_path / new_filename}")
+                segments = self.store.get_virtual_segments(metadata, ebook_file.name)
+                logger.info(f"[DRY RUN] Would create: {self.komga_path.joinpath(*segments)}")
             self.stats['migrated_books'] += 1
             return True
 

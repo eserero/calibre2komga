@@ -11,7 +11,7 @@ class CalibreMetadataStore:
         self.calibre_path = calibre_path
         self.metadata_db_path = self.calibre_path / 'metadata.db'
         self.metadata_cache = {}
-        self.supported_formats = {'.epub', '.kepub'}
+        self.supported_formats = {'.epub', '.kepub', '.cbz', '.cbz', '.pdf', '.mobi', '.azw3'}
 
     def validate(self) -> bool:
         if not self.calibre_path.exists() or not self.calibre_path.is_dir():
@@ -77,14 +77,6 @@ class CalibreMetadataStore:
             sanitized = sanitized[:100]
         return sanitized
 
-    def get_series_folder_name(self, metadata: Dict) -> str:
-        author = metadata.get('author', 'Unknown Author')
-        series = metadata.get('series')
-        if series:
-            return self.sanitize_filename(f"{author} - {series}")
-        else:
-            return self.sanitize_filename(f"{author}")
-
     def get_file_name(self, metadata: Dict, original_filename: str) -> str:
         title = metadata.get('title', 'Unknown Title')
         series_index = metadata.get('series_index')
@@ -102,6 +94,25 @@ class CalibreMetadataStore:
             filename = clean_title
         
         return self.sanitize_filename(filename) + extension
+
+    def get_virtual_segments(self, metadata: Dict, original_filename: str) -> List[str]:
+        """
+        Returns the path segments for the virtual filesystem.
+        1. Series: Folder is just 'Series Name'.
+        2. No Series: Folder is 'Author Name/_oneshot'.
+        """
+        series = metadata.get('series')
+        author = metadata.get('author', 'Unknown Author')
+        filename = self.get_file_name(metadata, original_filename)
+        
+        if series:
+            # Series folder name is just the series name
+            folder = self.sanitize_filename(series)
+            return [folder, filename]
+        else:
+            # No series: Author Name / _oneshot / Filename
+            author_folder = self.sanitize_filename(author)
+            return [author_folder, "_oneshot", filename]
 
     def find_ebook_files(self, book_path: Path) -> List[Path]:
         files = []
