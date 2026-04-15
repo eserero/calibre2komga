@@ -22,11 +22,12 @@ class CalibreMetadataStore:
             return False
         return True
 
-    def load(self) -> bool:
+    def load(self, audiobook_column: Optional[str] = None, audiobook_base_path: Optional[Path] = None) -> bool:
         try:
             conn = sqlite3.connect(self.metadata_db_path)
             cursor = conn.cursor()
             
+            # Base query
             query = """
             SELECT 
                 b.id, b.title, b.path, b.series_index,
@@ -43,19 +44,80 @@ class CalibreMetadataStore:
             """
             
             cursor.execute(query)
-            for row in cursor.fetchall():
+            rows = cursor.fetchall()
+            
+            # Map column names to indexes for clarity
+            # b.id, b.title, b.path, b.series_index, a.name, s.name, formats
+            
+            audiobook_map = {}
+            if audiobook_column:
+                # 1. Find the table name and type for the custom column
+                cursor.execute("SELECT id, datatype FROM custom_columns WHERE label=?", (audiobook_column,))
+                col_row = cursor.fetchone()
+                if col_row:
+                    col_id, datatype = col_row
+                    col_table = f"custom_column_{col_id}"
+                    
+                    try:
+                        # 2. Check the table structure to find the correct book-link column
+                        # Some use 'book', some might use 'book_id' or require a link table
+                        cursor.execute(f"PRAGMA table_info({col_table})")
+                        columns = [c[1] for c in cursor.fetchall()]
+                        
+                        book_col = None
+                        if 'book' in columns:
+                            book_col = 'book'
+                        elif 'book_id' in columns:
+                            book_col = 'book_id'
+                            
+                        if book_col:
+                            # Standard text/number column
+                            cursor.execute(f"SELECT {book_col}, value FROM {col_table}")
+                            for book_id, value in cursor.fetchall():
+                                if value and str(value).strip():
+                                    audiobook_map[book_id] = str(value).strip()
+                        else:
+                            # It might be a 'many-to-one' or 'text with fixed options' column
+                            # These use a link table: books_custom_column_X_link
+                            link_table = f"books_custom_column_{col_id}_link"
+                            cursor.execute(f"SELECT l.book, v.value FROM {link_table} l JOIN {col_table} v ON l.value = v.id")
+                            for book_id, value in cursor.fetchall():
+                                if value and str(value).strip():
+                                    audiobook_map[book_id] = str(value).strip()
+                                    
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"Could not read custom column table {col_table}: {e}")
+                else:
+                    logger.warning(f"Audiobook custom column '{audiobook_column}' not found in Calibre database.")
+
+            for row in rows:
                 book_id, title, path, series_index, author_name, series_name, formats = row
                 if author_name:
                     author_name = author_name.split(',')[0].strip()
                 
+                audio_rel_path = audiobook_map.get(book_id)
+                audio_abs_path = None
+                if audio_rel_path:
+                    # Normalize Windows-style backslashes to forward slashes for Linux
+                    norm_rel_path = audio_rel_path.replace('\\', '/').lstrip('/')
+                    
+                    full_path = audiobook_base_path / norm_rel_path if audiobook_base_path else Path(norm_rel_path)
+                    if full_path.exists() and full_path.is_dir():
+                        audio_abs_path = full_path
+                        logger.info(f"Resolved audiobook for '{title}': {audio_abs_path}")
+                    else:
+                        logger.warning(f"Audiobook path for '{title}' exists in DB ('{audio_rel_path}') but was not found on disk at: {full_path}")
+
                 self.metadata_cache[path] = {
                     'id': book_id,
                     'title': title,
                     'author': author_name or 'Unknown Author',
                     'series': series_name,
                     'series_index': series_index,
-                    'formats': formats.split(',') if formats else []
+                    'formats': formats.split(',') if formats else [],
+                    'audiobook_path': audio_abs_path
                 }
+                
             conn.close()
             logger.info(f"Loaded metadata for {len(self.metadata_cache)} books")
             return True

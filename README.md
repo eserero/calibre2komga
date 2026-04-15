@@ -7,9 +7,33 @@ This fork of `calibre2komga` adds a powerful **Virtual Filesystem (FUSE)** featu
 - **Modular Architecture**: Refactored for better maintenance and separate components for database parsing, exporting, and mounting.
 - **Docker Ready**: Includes specific support for `--allow-other` and clear instructions for Docker/Ubuntu environments.
 
-**[👉 Read the FUSE Setup & Mount Guide (USAGE_FUSE.md)](./USAGE_FUSE.md)**
+**[👉 Read the FUSE Setup & Mount Guide (USAGE_FUSE.md)](./docs/USAGE_FUSE.md)**
 
 ---
+
+## 🛠️ Installation & Setup
+
+### 1. Prerequisites (Linux)
+The FUSE feature requires `libfuse2`. On modern Ubuntu versions (22.04+), install it with:
+```bash
+sudo apt update
+# Ubuntu 22.04:
+sudo apt install libfuse2
+# Ubuntu 24.04:
+sudo apt install libfuse2t64
+```
+
+### 2. Python Environment
+It is recommended to use a virtual environment:
+```bash
+# Create venv
+python3 -m venv venv
+# Activate venv
+source venv/bin/activate
+# Install dependencies
+pip install -r requirements.txt
+```
+
 
 # calibre2komga, a Calibre to Komga Migration Script
 
@@ -86,36 +110,38 @@ This "tricks" Komga into thinking the files are in its preferred structure witho
 # Basic mount
 python3 calibre2komga.py mount /path/to/calibre /mnt/komga_virtual
 
+# Mount with Audiobook Injection (New!)
+python3 calibre2komga.py mount /path/to/calibre /mnt/komga_virtual \
+  --audiobook-column "audiobook_path" \
+  --audiobook-base-path "/path/to/audiobooks"
+
 # For Docker support (requires editing /etc/fuse.conf)
 python3 calibre2komga.py mount /path/to/calibre /mnt/komga_virtual --allow-other
 ```
-See [USAGE_FUSE.md](./USAGE_FUSE.md) for detailed instructions on backgrounding and permissions.
+See [USAGE_FUSE.md](./docs/USAGE_FUSE.md) for detailed instructions on backgrounding and permissions.
 
 ### Option B: Basic Migration (Copying Files)
 ```bash
 python3 calibre2komga.py export /path/to/calibre /path/to/komga
 ```
 
-### Dry Run (Recommended First for Export)
-Preview what will be migrated without making any changes:
-```bash
-python3 calibre2komga.py export /path/to/calibre /path/to/komga --dry-run
-```
+---
 
-### Migrate Specific Author
-```bash
-python calibre2komga.py /path/to/calibre/library /path/to/komga/library --author "Brandon Sanderson"
-```
+## 🎧 Audiobook Integration
 
-### Verbose Output
-```bash
-python calibre2komga.py /path/to/calibre/library /path/to/komga/library --verbose
-```
+The virtual filesystem can dynamically merge audiobook folders into your EPUB files on the fly. This allows media servers like Komga to "see" audiobook files (like `.mp3` or `.m4a`) as if they were stored inside the EPUB archive in a subfolder named `audiobook/`.
 
-### Combined Options
-```bash
-python calibre2komga.py /path/to/calibre/library /path/to/komga/library --dry-run --author "Isaac Asimov" --verbose
-```
+### How to set it up:
+1.  **Calibre Side:** Create a custom column in Calibre (type: "Text") to store the **relative path** to the book's audiobook folder.
+2.  **Filesystem Side:** Ensure your audiobooks are stored in a consistent root directory.
+3.  **Mount Command:** Use the flags below to tell the script how to link them.
+
+**What happens if flags are missing?**
+- If `--audiobook-column` is not provided, the script behaves normally (no audio injection).
+- If `--audiobook-exts` is omitted, it defaults to `.mp3,.m4a`.
+- If a book has no value in the specified custom column, it is served as a regular EPUB.
+
+---
 
 ## Command Line Options
 
@@ -126,6 +152,10 @@ python calibre2komga.py /path/to/calibre/library /path/to/komga/library --dry-ru
 | `--dry-run` | Show what would be migrated without copying files |
 | `--author "Name"` | Filter migration to specific author (case insensitive partial match) |
 | `--verbose` | Enable detailed logging output |
+| `--allow-other` | Allow other users to access the mount (required for Docker) |
+| `--audiobook-column` | Name of the Calibre custom column containing the audiobook relative path |
+| `--audiobook-base-path`| Absolute path to the root folder where audiobooks are stored |
+| `--audiobook-exts` | Comma-separated list of allowed audio extensions (default: `.mp3,.m4a`) |
 
 ## How It Works
 
@@ -179,6 +209,48 @@ Migration Summary:
 
 - [Calibre](https://github.com/kovidgoyal/calibre) - E-book management software
 - [Komga](https://github.com/gotson/komga) - Media server for comics/ebooks
+
+
+---
+
+## 📦 Virtual ZIP Utility (`virtual_zip.py`)
+
+A standalone utility that virtually merges an existing ZIP file with an external directory. It presents them as a single valid ZIP file via FUSE. This is used by the main script to inject audiobooks into EPUB files on the fly.
+
+### Usage:
+```bash
+python3 virtual_zip.py /path/to/base.zip /path/to/extra_files /path/to/mount_dir --target-dir "audiobook" --exts ".mp3,.m4a"
+```
+
+### 🧪 Testing the Utility
+We have included a test data setup to verify the engine works:
+
+1. **Create Test Data:**
+   ```bash
+   mkdir -p test_data/extra
+   python3 -c "import zipfile; z = zipfile.ZipFile('test_data/base.zip', 'w'); z.writestr('original.txt', 'Original content'); z.close()"
+   echo "Audio 1" > test_data/extra/audio1.mp3
+   echo "Audio 2" > test_data/extra/audio2.m4a
+   mkdir -p test_mount
+   ```
+
+2. **Run the Virtual Mount:**
+   ```bash
+   source venv/bin/activate
+   python3 virtual_zip.py test_data/base.zip test_data/extra test_mount
+   ```
+
+3. **Verify (In another terminal):**
+   ```bash
+   # List the virtual ZIP content
+   unzip -l test_mount/base.zip
+   # Verify integrity (CRC check)
+   unzip -t test_mount/base.zip
+   # Extract to verify data
+   mkdir -p extracted_test && unzip test_mount/base.zip -d extracted_test
+   ```
+
+---
 
 ---
 

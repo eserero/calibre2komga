@@ -40,7 +40,9 @@ def run_mount(args, store):
     logger.info(f"Mounting FUSE filesystem at {args.komga_path}...")
     logger.info("Press Ctrl+C to unmount.")
     
-    fuse_fs = KomgaFuse(store=store, author_filter=args.author)
+    audiobook_exts = args.audiobook_exts.split(',') if getattr(args, 'audiobook_exts', None) else [".mp3", ".m4a"]
+    
+    fuse_fs = KomgaFuse(store=store, author_filter=args.author, audiobook_exts=audiobook_exts)
     fuse_opts = {'nothreads': True, 'foreground': True}
     if args.allow_other:
         fuse_opts['allow_other'] = True
@@ -68,6 +70,11 @@ Examples:
   
   # FUSE Mount (Virtual filesystem, no files copied)
   python calibre2komga.py mount /path/to/calibre /mnt/komga_virtual
+
+  # FUSE Mount with Audiobook Injection
+  python calibre2komga.py mount /path/to/calibre /mnt/komga_virtual \
+    --audiobook-column "audiobook_path" \
+    --audiobook-base-path /path/to/audiobooks
         '''
     )
     
@@ -89,6 +96,11 @@ Examples:
     mount_parser.add_argument('--author', help='Filter by author name (case insensitive partial match)')
     mount_parser.add_argument('--allow-other', action='store_true', help='Allow other users to access the mount (required for Docker)')
     
+    # Audiobook options for mount
+    mount_parser.add_argument('--audiobook-column', help='Calibre custom column name containing the audiobook relative path')
+    mount_parser.add_argument('--audiobook-base-path', help='Base path where audiobooks are stored')
+    mount_parser.add_argument('--audiobook-exts', default='.mp3,.m4a', help='Comma-separated list of audiobook extensions (default: .mp3,.m4a)')
+    
     args = parser.parse_args(argv)
     
     if args.verbose:
@@ -98,12 +110,17 @@ Examples:
     if not store.validate():
         sys.exit(1)
         
-    if not store.load():
+    # Load metadata with audiobook info if provided
+    audiobook_base_path = Path(args.audiobook_base_path) if getattr(args, 'audiobook_base_path', None) else None
+    audiobook_column = getattr(args, 'audiobook_column', None)
+    
+    if not store.load(audiobook_column=audiobook_column, audiobook_base_path=audiobook_base_path):
         sys.exit(1)
         
     if args.command == 'export':
         run_export(args, store)
     elif args.command == 'mount':
+        # Add audiobook_exts to args if they exist
         run_mount(args, store)
 
 if __name__ == '__main__':
