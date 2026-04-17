@@ -4,6 +4,7 @@ import logging
 import zlib
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
+from crc_cache import CRCCache
 
 logger = logging.getLogger(__name__)
 
@@ -11,6 +12,7 @@ class VirtualZipMapper:
     """
     Virtually merges an existing ZIP file with an external directory.
     Exposes a flat byte-range 'read' API that makes the combination look like a single valid ZIP.
+    Lazy initialization: doesn't calculate CRCs or build full extents until requested.
     """
     
     # ZIP Constants
@@ -22,24 +24,28 @@ class VirtualZipMapper:
     CDH_SIZE = 46
     EOCD_SIZE = 22
 
-    def __init__(self, base_zip_path: str, external_dir: str, target_dir: str = "audiobook", allowed_exts: List[str] = [".mp3", ".m4a"]):
+    def __init__(self, base_zip_path: str, external_dir: str, target_dir: str = "audiobook", 
+                 allowed_exts: List[str] = [".mp3", ".m4a"], crc_cache: Optional[CRCCache] = None):
         self.base_zip_path = Path(base_zip_path)
         self.external_dir = Path(external_dir)
         self.target_dir = target_dir.strip("/")
         self.allowed_exts = [ext.lower() for ext in allowed_exts]
+        self.crc_cache = crc_cache
         
         self.base_size = self.base_zip_path.stat().st_size
         self.external_files: List[Dict] = []
         self.extents: List[Tuple[int, int, Any]] = [] # (virtual_start, length, source_info)
         self.virtual_size = 0
-        
-        self._initialize()
+        self._is_initialized = False
 
-    def _initialize(self):
+    def _ensure_initialized(self):
+        if self._is_initialized:
+            return
+            
         # 1. Parse base ZIP EOCD and Central Directory
         base_cd_offset, base_cd_size, base_cd_entries = self._parse_base_eocd()
         
-        # 2. Scan external directory
+        # 2. Scan external directory (fast metadata scan)
         self._scan_external_dir()
         
         # 3. Build extents
@@ -58,9 +64,13 @@ class VirtualZipMapper:
         for ext_file in self.external_files:
             rel_path = f"{self.target_dir}/{ext_file['name']}"
             
-            # Calculate CRC32
-            with open(ext_file['path'], 'rb') as f:
-                crc = zlib.crc32(f.read())
+            # Get CRC from cache or calculate (This is the only slow part)
+            if self.crc_cache:
+                crc = self.crc_cache.get_or_calculate(ext_file['path'])
+            else:
+                # Fallback if no cache provided
+                with open(ext_file['path'], 'rb') as f:
+                    crc = zlib.crc32(f.read()) & 0xFFFFFFFF
             
             # Create LFH
             lfh = self._make_lfh(rel_path, ext_file['size'], ext_file['mtime'], crc)
@@ -93,11 +103,11 @@ class VirtualZipMapper:
         current_voffset += len(eocd)
         
         self.virtual_size = current_voffset
+        self._is_initialized = True
 
     def _parse_base_eocd(self) -> Tuple[int, int, int]:
         """Finds CD offset, CD size, and entry count from base ZIP."""
         with open(self.base_zip_path, 'rb') as f:
-            # ZIP files can have comments, so we search from the end for the EOCD signature
             f.seek(0, os.SEEK_END)
             filesize = f.tell()
             search_range = min(filesize, 65536 + self.EOCD_SIZE)
@@ -116,9 +126,11 @@ class VirtualZipMapper:
             return cd_offset, cd_size, num_entries
 
     def _scan_external_dir(self):
+        """Fast scan using only stat."""
         if not self.external_dir.is_dir():
             return
             
+        self.external_files = []
         for entry in sorted(self.external_dir.iterdir()):
             if entry.is_file() and entry.suffix.lower() in self.allowed_exts:
                 stat = entry.stat()
@@ -191,9 +203,21 @@ class VirtualZipMapper:
         )
 
     def get_virtual_size(self) -> int:
+        """Heuristic: if not initialized, we can estimate size fast."""
+        if not self._is_initialized:
+            # We need at least the base ZIP info and file list to estimate
+            base_cd_offset, _, _ = self._parse_base_eocd()
+            self._scan_external_dir()
+            
+            # Roughly: BaseData + Sum(LFH + FileData + CDH) + CombinedCD + EOCD
+            # But it's safer to just initialize if we need the exact size for FUSE
+            self._ensure_initialized()
+            
         return self.virtual_size
 
     def read(self, offset: int, length: int) -> bytes:
+        self._ensure_initialized()
+        
         if offset >= self.virtual_size:
             return b""
         
@@ -213,9 +237,13 @@ class VirtualZipMapper:
                 
                 if source[0] == "file":
                     path, base_file_offset = source[1], source[2]
-                    with open(path, 'rb') as f:
-                        f.seek(base_file_offset + source_offset)
-                        result.extend(f.read(overlap_len))
+                    try:
+                        with open(path, 'rb') as f:
+                            f.seek(base_file_offset + source_offset)
+                            result.extend(f.read(overlap_len))
+                    except FileNotFoundError:
+                        # Return zeros if file disappeared
+                        result.extend(b'\x00' * overlap_len)
                 elif source[0] == "mem":
                     data = source[1]
                     result.extend(data[source_offset:source_offset + overlap_len])
@@ -227,50 +255,3 @@ class VirtualZipMapper:
                 break
                 
         return bytes(result)
-
-if __name__ == "__main__":
-    import argparse
-    from fuse import FUSE, Operations, FuseOSError
-    import errno
-    import stat
-
-    class SingleFileFuse(Operations):
-        def __init__(self, mapper: VirtualZipMapper, filename: str):
-            self.mapper = mapper
-            self.filename = filename
-            self.virtual_size = mapper.get_virtual_size()
-
-        def getattr(self, path, fh=None):
-            if path == '/':
-                return dict(st_mode=(stat.S_IFDIR | 0o555), st_nlink=2)
-            if path == '/' + self.filename:
-                return dict(st_mode=(stat.S_IFREG | 0o444), st_nlink=1,
-                            st_size=self.virtual_size)
-            raise FuseOSError(errno.ENOENT)
-
-        def readdir(self, path, fh):
-            return ['.', '..', self.filename]
-
-        def open(self, path, flags):
-            if path != '/' + self.filename:
-                raise FuseOSError(errno.ENOENT)
-            if flags & (os.O_WRONLY | os.O_RDWR):
-                raise FuseOSError(errno.EROFS)
-            return 0
-
-        def read(self, path, length, offset, fh):
-            return self.mapper.read(offset, length)
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("base_zip")
-    parser.add_argument("extra_dir")
-    parser.add_argument("mountpoint")
-    parser.add_argument("--target-dir", default="audiobook")
-    parser.add_argument("--exts", default=".mp3,.m4a")
-    args = parser.parse_args()
-
-    mapper = VirtualZipMapper(args.base_zip, args.extra_dir, args.target_dir, args.exts.split(','))
-    filename = os.path.basename(args.base_zip)
-    
-    print(f"Mounting virtual {filename} at {args.mountpoint}")
-    FUSE(SingleFileFuse(mapper, filename), args.mountpoint, foreground=True, nothreads=True)

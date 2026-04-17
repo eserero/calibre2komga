@@ -7,14 +7,17 @@ from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 from calibre_core import CalibreMetadataStore
 from virtual_zip import VirtualZipMapper
+from crc_cache import CRCCache
 
 logger = logging.getLogger(__name__)
 
 class KomgaFuse(Operations):
-    def __init__(self, store: CalibreMetadataStore, author_filter: Optional[str] = None, audiobook_exts: List[str] = [".mp3", ".m4a"]):
+    def __init__(self, store: CalibreMetadataStore, author_filter: Optional[str] = None, 
+                 audiobook_exts: List[str] = [".mp3", ".m4a"], crc_cache: Optional[CRCCache] = None):
         self.store = store
         self.author_filter = author_filter
         self.audiobook_exts = audiobook_exts
+        self.crc_cache = crc_cache
         
         # In-memory virtual tree
         # structure: { "folder": { "subfolder": { "file.epub": VirtualZipMapper OR "/real/path" } } }
@@ -57,7 +60,8 @@ class KomgaFuse(Operations):
                             base_zip_path=str(ebook_file),
                             external_dir=str(audio_path),
                             target_dir="audiobook",
-                            allowed_exts=self.audiobook_exts
+                            allowed_exts=self.audiobook_exts,
+                            crc_cache=self.crc_cache
                         )
                         self._add_to_tree(segments, mapper)
                         logger.debug(f"Created virtual ZIP for {ebook_file.name} with audio from {audio_path}")

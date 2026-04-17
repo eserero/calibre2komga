@@ -29,6 +29,7 @@ def run_mount(args, store):
     try:
         from fuse import FUSE
         from virtual_fs import KomgaFuse
+        from crc_cache import CRCCache
     except ImportError:
         logger.error("The 'fusepy' library is required for mounting. Install it via: pip install fusepy")
         sys.exit(1)
@@ -42,7 +43,16 @@ def run_mount(args, store):
     
     audiobook_exts = args.audiobook_exts.split(',') if getattr(args, 'audiobook_exts', None) else [".mp3", ".m4a"]
     
-    fuse_fs = KomgaFuse(store=store, author_filter=args.author, audiobook_exts=audiobook_exts)
+    # Setup CRC cache for audiobooks
+    cache_path = Path.home() / ".cache" / "calibre2komga" / "crc_cache.db"
+    crc_cache = CRCCache(cache_path)
+    
+    fuse_fs = KomgaFuse(
+        store=store, 
+        author_filter=args.author, 
+        audiobook_exts=audiobook_exts,
+        crc_cache=crc_cache
+    )
     fuse_opts = {'nothreads': True, 'foreground': True}
     if args.allow_other:
         fuse_opts['allow_other'] = True
