@@ -1,2 +1,6 @@
 __pycache__/
 venv/
+*.log
+komga_virtual/
+grimmory_virtual/
+grimmory-sidecar-import*.sqlite3*

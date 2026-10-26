@@ -1,4 +1,151 @@
-# 🚀 calibre2komga (eserero fork) - Virtual Filesystem Support
+# Calibre libraries for Komga and Grimmory
+
+This repository provides three independent tools. The existing Komga implementation remains in the repository root; Grimmory tools live in `calibre2grimmory/` and do not import or change Komga modules.
+
+| Tool | Entry point | Purpose |
+| --- | --- | --- |
+| calibre2komga | `calibre2komga.py` | Export or virtually expose ebooks in Komga's series hierarchy, including optional audiobook injection into virtual EPUBs. |
+| calibre2grimmory | `calibre2grimmory/calibre2grimmory.py` | A read-only FUSE view retaining Calibre's hierarchy, with native audio folders and optional cached JSON sidecars. |
+| Grimmory sidecar importer | `calibre2grimmory/grimmory_import_sidecars.py` | Apply sidecars to Grimmory one book/request/transaction at a time, with live progress and resume. |
+
+## Get the scripts
+
+```bash
+git clone https://github.com/eserero/calibre2komga.git
+cd calibre2komga
+```
+
+For an existing checkout, update it with `git pull --ff-only` when your local changes allow it. All commands below start in the repository root. Replace `/path/to/calibre` (the directory containing `metadata.db`), `/path/to/audiobooks`, and the Grimmory URL with your own locations. The two mount tools use separate mountpoints and can run independently.
+
+If earlier test versions were copied directly into the repository root, switch to the `calibre2grimmory/...` entry points shown below. Git updates the committed subfolder files, not those manually copied root-level scripts.
+
+## 1. calibre2komga: existing Komga workflow
+
+Keep using your existing working Python environment and mount command. Fresh installations can use the Python/FUSE setup in the existing installation section below and the [Komga FUSE guide](docs/USAGE_FUSE.md). Komga's mount uses the pip `fusepy` package's `fuse` module; the apt package's `fusepy` module alone is not a substitute for this unchanged implementation.
+
+For Docker access, enable `user_allow_other` in `/etc/fuse.conf` before using `--allow-other`. Use an empty, unmounted target, outside the sources:
+
+```bash
+mkdir -p "$HOME/calibre2komga/komga_virtual"
+nohup python3 calibre2komga.py mount \
+  /path/to/calibre "$HOME/calibre2komga/komga_virtual" \
+  --allow-other \
+  --audiobook-column audiobookfiles \
+  --audiobook-base-path /path/to/audiobooks \
+  --audiobook-exts ".mp3,.m4a,.m4b" \
+  > calibre_mount.log 2>&1 &
+```
+
+Use the Python executable from your existing environment if it differs from `python3`. To export actual copies instead of mounting:
+
+```bash
+python3 calibre2komga.py export /path/to/calibre /path/to/komga-export
+```
+
+Komga's optional audio integration injects audio into the virtual EPUB representation. Its code, dependencies, flags, hierarchy and existing behavior are unchanged by the Grimmory additions. Full original Komga documentation follows the Grimmory quick starts below.
+
+## 2. calibre2grimmory: native audio and cached metadata
+
+Requires Python 3.9+; mounting requires Linux and FUSE. On Ubuntu/Debian, system Python can use:
+
+```bash
+sudo apt update
+sudo apt install python3-fusepy
+python3 -c "import fusepy; print('FUSE ready')"
+```
+
+The Grimmory mount supports both `fuse` (pip) and `fusepy` (apt) module names. A venv is optional; [the Grimmory guide](calibre2grimmory/README.md) covers that alternative and system libfuse requirements. Enable `user_allow_other` in `/etc/fuse.conf` for `--allow-other`.
+
+Calibre's `audiobookfiles` custom text column contains relative audio-folder paths under the audio root. Multiple lines create separate full virtual book folders, each exposing the original ebook files plus one `audiobook/` folder. Nested audio stays nested. Files are referenced, not copied or embedded in EPUBs.
+
+Preview the view, including optional metadata caching:
+
+```bash
+python3 calibre2grimmory/calibre2grimmory.py preview \
+  --calibre /path/to/calibre \
+  --audio-base /path/to/audiobooks \
+  --sidecar-cache "$HOME/.cache/calibre2grimmory" \
+  --output grimmory-preview.json
+```
+
+Mount it:
+
+```bash
+mkdir -p "$HOME/calibre2komga/grimmory_virtual"
+nohup python3 calibre2grimmory/calibre2grimmory.py mount \
+  --calibre /path/to/calibre \
+  --audio-base /path/to/audiobooks \
+  --mountpoint "$HOME/calibre2komga/grimmory_virtual" \
+  --allow-other \
+  --audiobook-column audiobookfiles \
+  --sidecar-cache "$HOME/.cache/calibre2grimmory" \
+  > grimmory_mount.log 2>&1 &
+```
+
+Without `--sidecar-cache`, this is the original passthrough view and no OPF conversion occurs. With it, real generated JSON files are stored only in the dedicated cache directory; virtual `.metadata.json` and `.cover.jpg` files appear beside the media. Calibre's database, OPFs and media stay read-only. Unchanged OPFs reuse cached JSON; changed/new OPFs are converted. Warm starts check file attributes and the cache index, while JSON reads and virtual alias discovery happen on demand. The logs report reused/converted counts, payload size, folder-planning time, cache time, and mount readiness.
+
+Converted fields include title, authors, publisher, publication date, description, language, validated ISBNs, supported provider IDs, primary series/index, tags, category, pages and narrators. `#series2` and `#readinglist` are preserved as prefixed tags. Reading status/progress and other unsupported custom fields are excluded. See the [field mapping and cache details](calibre2grimmory/README.md#virtual-metadata-sidecars).
+
+### Docker, remounts, and metadata import
+
+1. Mount the FUSE view **before** starting Grimmory. Bind-mount the host view read-only, for example `/home/your-user/calibre2komga/grimmory_virtual:/calibre:ro`.
+2. Select **One book per folder** and **Prefer Sidecar** in the Grimmory library. Disable metadata/sidecar writing and automatic file moving for this read-only view.
+3. After a host FUSE remount, restart the Grimmory container so its bind mount sees the new view. Host visibility alone does not prove container visibility. For example, after replacing the mount, `docker restart grimmory` restarts a container named `grimmory`.
+4. Let Grimmory finish its library scan, then run the sequential sidecar importer below to apply Calibre's JSON metadata.
+
+Grimmory 3.5.0's initial format importers read embedded metadata without applying the JSON sidecar preference; this was also checked at develop commit `9a33c5b1ba8c6542b060d265c824b4281c62981b`. EPUBs may look correct because they already contain embedded metadata. Generating JSON alone does not guarantee that a library scan imports it. This is why the separate import step is needed.
+
+The UI also exposes **Settings → Metadata 2 → Library-Specific Overrides → Books → Import Sidecar**. In 3.5.0 that library-wide operation uses one transaction across all books; large libraries can take a long time with no committed progress visible until completion. Leaving the settings page resets its local spinner and unsubscribes the browser's request, so the spinner is not reliable evidence of server completion. The separate script below uses the working single-book endpoint instead.
+
+To inspect or stop either mount, use its own log/target:
+
+```bash
+tail -f grimmory_mount.log
+fusermount -u "$HOME/calibre2komga/grimmory_virtual"
+# Separately, for Komga:
+fusermount -u "$HOME/calibre2komga/komga_virtual"
+```
+
+Stop consumer activity before unmounting; the target must be empty and unmounted before mounting again. Restart the view after Calibre has saved OPF/path/association changes, then refresh Grimmory and import sidecars. Some nested audiobook playback/grouping behavior remains a Grimmory limitation.
+
+## 3. Grimmory sidecar fix: sequential import with live progress
+
+Requires only Python 3.9+ standard libraries: no FUSE dependency, pip install, or venv is needed for this helper. **Finish or stop any existing library-wide import before running it.** Restarting Grimmory cancels an active bulk request and rolls back its uncommitted transaction; let the server become healthy before beginning a new import.
+
+From the repository root, run against your Grimmory server:
+
+```bash
+python3 -u calibre2grimmory/grimmory_import_sidecars.py \
+  --url "http://127.0.0.1:6060" \
+  --username admin \
+  --library Books \
+  --state "$HOME/.local/state/calibre2grimmory/books-import.sqlite3"
+```
+
+The password is requested interactively and is not saved. Live terminal output shows current book, processed/total, percentage, imported/resumed/unchanged/missing/failed counts, elapsed time and ETA. Each successful book request commits independently and is immediately recorded in the local SQLite checkpoint.
+
+- **Try a small batch:** add `--limit 10`, then remove it to continue through the library.
+- **Stop/resume:** Ctrl+C stops the helper; rerun the same command and retain the state file to skip completed books. An interrupted in-flight request may need server verification before resuming.
+- **Future metadata updates:** add `--recheck`; completed books are imported again only if their sidecar metadata changed. A normal resume skips completed IDs without rechecking them.
+- **Preview:** add `--dry-run` to inspect sidecars without importing or marking books completed.
+- **One book:** add `--book-id 81670`, replacing the example ID with a record in the selected library.
+- **Load control:** `--delay 0.1` is the default pause between books; `--timeout 120` limits each request. Uncertain POST results stop the run without an automatic retry.
+- **Keep a log:** append `2>&1 | tee grimmory_sidecar_import.log`. Piped/redirected progress is printed every five seconds by default; `--progress-seconds 1` changes that interval.
+
+Use a new state file if the library is deleted/recreated or you switch servers. Field locks remain effective; only supplied metadata is applied. The helper does not import cover images or personal reading progress. Full behavior, exit codes and recovery instructions: [IMPORT-SIDECARS.md](calibre2grimmory/IMPORT-SIDECARS.md).
+
+The mount/cache and sequential importer have been confirmed working by the user. Automated validation includes 19 mount/metadata-cache tests and 10 importer tests, including a local HTTP fixture. Run them with:
+
+```bash
+python3 calibre2grimmory/test_calibre2grimmory.py
+python3 calibre2grimmory/test_grimmory_import_sidecars.py
+```
+
+## Existing Komga documentation
+
+The following sections document the original Komga workflow and remain applicable to that tool.
+
+### 🚀 calibre2komga (eserero fork) - Virtual Filesystem Support
 
 This fork of `calibre2komga` adds a powerful **Virtual Filesystem (FUSE)** feature. Instead of copying thousands of files and wasting disk space, this tool can "mount" your Calibre library into a format that Komga understands perfectly.
 
