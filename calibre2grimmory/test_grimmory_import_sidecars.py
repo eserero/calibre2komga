@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -199,6 +200,53 @@ class Tests(unittest.TestCase):
             finally:
                 server.shutdown()
                 worker.join()
+
+    def make_cache(self):
+        root = Path(self.temp.name) / 'cache'; root.mkdir(exist_ok=True)
+        index = {}
+        for bid in (1, 2):
+            source = '/calibre/Author/Book %s (%s)/metadata.opf' % (bid,bid)
+            key = hashlib.sha256(source.encode()).hexdigest()
+            raw = json.dumps(self.client.sidecars[bid]).encode()
+            (root/(key+'.metadata.json')).write_bytes(raw)
+            index[key] = {'source':source,'sha256':hashlib.sha256(raw).hexdigest()}
+            self.client.books[bid-1]['primaryFile'] = {'fileSubPath':'Author/Book %s (%s)' % (bid,bid)}
+        (root/'index.json').write_text(json.dumps(index))
+        return root
+
+    def test_fast_cache_skips_all_unchanged_book_api_reads(self):
+        root = self.make_cache()
+        self.run_import(sidecar_cache=root)
+        self.client.calls.clear()
+        self.run_import(sidecar_cache=root)
+        self.assertNotIn(('GET','/api/v1/books/1/sidecar'), self.client.calls)
+        self.assertNotIn(('GET','/api/v1/books/2/sidecar'), self.client.calls)
+        self.assertEqual(self.posts(),[])
+        self.client.sidecars[2]['metadata']['publisher']='New publisher'
+        self.make_cache(); self.client.calls.clear()
+        self.run_import(sidecar_cache=root)
+        self.assertEqual(self.posts(),['/api/v1/books/2/sidecar/import'])
+        self.assertNotIn(('GET','/api/v1/books/1/sidecar'), self.client.calls)
+
+    def test_cache_must_agree_with_mounted_sidecar(self):
+        root = self.make_cache(); self.run_import(sidecar_cache=root)
+        self.client.sidecars[2]['metadata']['title']='New cache title'
+        self.make_cache()
+        self.client.sidecars[2]['metadata']['title']='Second'  # running mount still has the old JSON
+        self.client.calls.clear()
+        result, output = self.run_import(sidecar_cache=root)
+        self.assertEqual(result,2)
+        self.assertIn('differs from the JSON visible', output)
+        self.assertEqual(self.posts(),[])
+
+    def test_set_order_and_legacy_checkpoints(self):
+        self.client.sidecars[1]['metadata']['tags']=['Fantasy','Fiction']
+        self.run_import()  # old checkpoint, before the fast-cache option was enabled
+        root = self.make_cache()
+        self.client.sidecars[1]['metadata']['tags']=['Fiction','Fantasy']
+        self.client.calls.clear(); self.run_import(sidecar_cache=root)
+        self.client.calls.clear(); self.run_import(sidecar_cache=root)
+        self.assertNotIn(('GET','/api/v1/books/1/sidecar'), self.client.calls)
 
 
 if __name__ == '__main__':

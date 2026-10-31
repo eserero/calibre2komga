@@ -55,6 +55,20 @@ Once the JSON cache/view is updated and Grimmory can read the new sidecars, add:
 
 This reads sidecars for previously completed books, compares a fingerprint of their metadata, and imports only changed or new metadata. Generation timestamps are excluded from the fingerprint. A normal resume deliberately skips completed IDs; use `--recheck` for future metadata updates.
 
+### Optional fast change detection from the local JSON cache
+
+When the helper runs on the machine with the mount's JSON cache, add this option while retaining your existing `--state` file:
+
+```bash
+--sidecar-cache "$HOME/.cache/calibre2grimmory"
+```
+
+This automatically enables incremental change checks using the converter's `index.json`. It skips unchanged successful entries without fetching their sidecars through the API. For changed/new entries it fetches Grimmory's sidecar and checks that its metadata agrees with the local cached JSON before importing. If the cache and running mount disagree, the entry is reported as failed rather than checkpointing stale metadata: refresh/remount and restart the container as appropriate, then resume.
+
+The first run enabling this option for an older checkpoint verifies each completed entry once to establish its local-cache association. Subsequent unchanged runs skip those per-book calls. Ambiguous/unmatched cache paths fall back to API checks. The library book list is still fetched once each run; fast mode does not make startup instantaneous and only notices changes already recorded by the mount's converter cache. Update the mount/cache after Calibre changes before invoking the importer.
+
+Without a local cache, the original `--recheck` behavior remains available. To force full sidecar checks instead of cache-index hints, omit `--sidecar-cache` and use `--recheck`. No FUSE mount behavior was changed by this option.
+
 ## Other controls and logs
 
 - `--dry-run`: inspect sidecars and show what would be imported without changing Grimmory or marking books completed. It may create the local checkpoint database/lock file.
@@ -84,4 +98,4 @@ Exit codes: `0` completed (possibly with missing sidecars), `2` completed with p
 python3 calibre2grimmory/test_grimmory_import_sidecars.py
 ```
 
-Ten tests cover individual HTTP endpoints, authentication renewal, sequential processing, resume, a single changed sidecar, missing/invalid sidecars, library identity protection, dry-run, limits, checkpoint locking and preservation of committed successes after an uncertain request. A local HTTP fixture validates the real client without touching a live Grimmory library. The single-book server endpoint was verified against actual records, and the user subsequently confirmed that the sequential helper works on the live installation.
+Thirteen tests cover individual HTTP endpoints, authentication renewal, sequential processing, resume, a single changed sidecar, missing/invalid sidecars, library identity protection, dry-run, limits, checkpoint locking, preservation of committed successes after an uncertain request, fast-cache skipping, cache/mount agreement, set ordering and legacy checkpoints. A local HTTP fixture validates the real client without touching a live Grimmory library. The single-book server endpoint was verified against actual records, and the user subsequently confirmed that the sequential helper works on the live installation; the new fast-cache path is locally tested.

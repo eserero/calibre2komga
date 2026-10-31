@@ -1,12 +1,38 @@
-# Calibre libraries for Komga and Grimmory
+# Calibre libraries for Komga, Grimmory and BookOrbit
 
-This repository provides three independent tools. The existing Komga implementation remains in the repository root; Grimmory tools live in `calibre2grimmory/` and do not import or change Komga modules.
+This repository provides separate mount and metadata tools. The existing Komga implementation remains in the repository root; the new metadata sync reads its naming rules without modifying it. Grimmory tools live in `calibre2grimmory/`; the independent BookOrbit mount lives in `calibre2bookorbit/`.
 
 | Tool | Entry point | Purpose |
 | --- | --- | --- |
 | calibre2komga | `calibre2komga.py` | Export or virtually expose ebooks in Komga's series hierarchy, including optional audiobook injection into virtual EPUBs. |
 | calibre2grimmory | `calibre2grimmory/calibre2grimmory.py` | A read-only FUSE view retaining Calibre's hierarchy, with native audio folders and optional cached JSON sidecars. |
 | Grimmory sidecar importer | `calibre2grimmory/grimmory_import_sidecars.py` | Apply sidecars to Grimmory one book/request/transaction at a time, with live progress and resume. |
+| Komga metadata sync | `komga_sync_metadata.py` | Preview/apply Calibre metadata through the API, with incremental checkpoints and file-type filtering. |
+| calibre2bookorbit | `calibre2bookorbit/calibre2bookorbit.py` | Independent read-only view with audio beside ebooks and original Calibre OPF sidecars for BookOrbit. |
+
+## calibre2bookorbit: ebooks and audio in the same folder
+
+The separate BookOrbit script retains Calibre's author/book hierarchy, exposes each recording's audio directly beside the ebook, and passes through `metadata.opf` and `cover.jpg`. Multiple recordings create separate full book folders. Nested audio is exposed as a flat numbered sequence in folder/filename order. Nothing is copied, embedded or converted to JSON, and no changes to the other mount scripts are required.
+
+Requires Python 3.9+ and, for mounting, Linux/FUSE (`sudo apt install python3-fusepy`). Enable `user_allow_other` in `/etc/fuse.conf` for Docker access. From the repository root:
+
+```bash
+python3 calibre2bookorbit/calibre2bookorbit.py preview \
+  --calibre "/path/to/Caliber" \
+  --audio-base "/path/to/Audiobooks" \
+  --output bookorbit-preview.json
+
+mkdir -p "$HOME/calibre2komga/bookorbit_virtual"
+nohup python3 calibre2bookorbit/calibre2bookorbit.py mount \
+  --calibre "/path/to/Caliber" \
+  --audio-base "/path/to/Audiobooks" \
+  --mountpoint "$HOME/calibre2komga/bookorbit_virtual" \
+  --allow-other \
+  --audiobook-column audiobookfiles \
+  > bookorbit_mount.log 2>&1 &
+```
+
+Point BookOrbit at this view using **Folder as Book**, prefer OPF sidecars in **Book details come from**, and disable file moving/renaming and metadata writes. For Docker, bind the view read-only and restart the container after remounting it. No Grimmory sidecar importer or JSON cache is used. See the [BookOrbit guide](calibre2bookorbit/README.md) for the command using your existing source paths, track ordering, limitations and tests. The user has confirmed the BookOrbit mount is working; its filesystem behavior is also covered by automated tests.
 
 ## Get the scripts
 
@@ -15,7 +41,7 @@ git clone https://github.com/eserero/calibre2komga.git
 cd calibre2komga
 ```
 
-For an existing checkout, update it with `git pull --ff-only` when your local changes allow it. All commands below start in the repository root. Replace `/path/to/calibre` (the directory containing `metadata.db`), `/path/to/audiobooks`, and the Grimmory URL with your own locations. The two mount tools use separate mountpoints and can run independently.
+For an existing checkout, update it with `git pull --ff-only` when your local changes allow it. All commands below start in the repository root. Replace `/path/to/calibre` (the directory containing `metadata.db`), `/path/to/audiobooks`, and the Grimmory URL with your own locations. The three mount tools use separate mountpoints and can run independently.
 
 If earlier test versions were copied directly into the repository root, switch to the `calibre2grimmory/...` entry points shown below. Git updates the committed subfolder files, not those manually copied root-level scripts.
 
@@ -127,6 +153,7 @@ The password is requested interactively and is not saved. Live terminal output s
 - **Try a small batch:** add `--limit 10`, then remove it to continue through the library.
 - **Stop/resume:** Ctrl+C stops the helper; rerun the same command and retain the state file to skip completed books. An interrupted in-flight request may need server verification before resuming.
 - **Future metadata updates:** add `--recheck`; completed books are imported again only if their sidecar metadata changed. A normal resume skips completed IDs without rechecking them.
+- **Fast local checks:** add `--sidecar-cache "$HOME/.cache/calibre2grimmory"` to use the mount's JSON-cache index. Retain the same `--state` file. After a first association check, unchanged completed books need no per-book sidecar API calls; changed entries are checked against the JSON visible to Grimmory before importing. Details and fallback behavior are in [IMPORT-SIDECARS.md](calibre2grimmory/IMPORT-SIDECARS.md#optional-fast-change-detection-from-the-local-json-cache).
 - **Preview:** add `--dry-run` to inspect sidecars without importing or marking books completed.
 - **One book:** add `--book-id 81670`, replacing the example ID with a record in the selected library.
 - **Load control:** `--delay 0.1` is the default pause between books; `--timeout 120` limits each request. Uncertain POST results stop the run without an automatic retry.
@@ -134,12 +161,35 @@ The password is requested interactively and is not saved. Live terminal output s
 
 Use a new state file if the library is deleted/recreated or you switch servers. Field locks remain effective; only supplied metadata is applied. The helper does not import cover images or personal reading progress. Full behavior, exit codes and recovery instructions: [IMPORT-SIDECARS.md](calibre2grimmory/IMPORT-SIDECARS.md).
 
-The mount/cache and sequential importer have been confirmed working by the user. Automated validation includes 19 mount/metadata-cache tests and 10 importer tests, including a local HTTP fixture. Run them with:
+The mount/cache and original sequential importer have been confirmed working by the user. Automated validation includes 19 Grimmory mount/metadata-cache tests, 13 importer tests, 13 Komga sync tests and 13 BookOrbit tests (58 total), including local HTTP fixtures. New incremental paths are locally tested; no live Komga changes were made by the tests. Run them with:
 
 ```bash
 python3 calibre2grimmory/test_calibre2grimmory.py
 python3 calibre2grimmory/test_grimmory_import_sidecars.py
+python3 test_komga_sync_metadata.py
+python3 calibre2bookorbit/test_calibre2bookorbit.py
 ```
+
+## 4. Komga metadata sync: PDF-only or other file types
+
+This separate script updates metadata through Komga's API. It does not change the working Komga mount, media files, series titles or folder-based grouping. Keep it with the repository modules; no extra pip packages are needed. Preview is the default:
+
+```bash
+python3 -u komga_sync_metadata.py \
+  --url "http://localhost:25600" \
+  --username "you@example.com" \
+  --library Books \
+  --calibre "/path/to/calibre" \
+  --file-types pdf \
+  --state "$HOME/.local/state/calibre2komga/metadata-sync.sqlite3" \
+  --report komga-metadata-preview.json
+```
+
+Replace the example URL, administrator login and Calibre path. Review the preview and add `--apply` to update. Use `--file-types pdf,epub` or repeat the option for multiple extensions; omit it for all types. Any extension is accepted, but it must correspond to a book already supported by Komga/the mount and uniquely matched by its exact virtual path. Existing locks are respected. A PDF-only run skips shared descriptive series fields if that series also contains unselected EPUBs or other formats.
+
+Successful book/series payload fingerprints and parsed OPFs are saved in the local state database. Normal repeat runs skip unchanged successes and PATCH only differing fields for changed/new source payloads, using paginated library indexes rather than per-book GET requests. Use `--force` to recompare saved successes after Komga refreshes or manual edits. Keep the same state file when changing filters or resuming. Add `--limit 10` for an initial small trial. Series names are never changed.
+
+Fields, matching, incremental behavior and limitations: [KOMGA_METADATA_SYNC.md](docs/KOMGA_METADATA_SYNC.md).
 
 ## Existing Komga documentation
 

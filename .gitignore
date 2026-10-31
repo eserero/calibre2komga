@@ -4,3 +4,5 @@ venv/
 komga_virtual/
 grimmory_virtual/
 grimmory-sidecar-import*.sqlite3*
+komga-metadata-sync*.sqlite3*
+bookorbit_virtual/

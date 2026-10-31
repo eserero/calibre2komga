@@ -7,6 +7,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import sqlite3
 import sys
@@ -20,6 +21,59 @@ class ImportFailure(Exception):
 
 class AmbiguousImport(ImportFailure):
     pass
+
+
+def metadata_digest(metadata):
+    return hashlib.sha256(json.dumps(metadata, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+
+
+class LocalSidecars:
+    """Read-only hints from the FUSE converter cache; ambiguous paths fall back to the API."""
+    def __init__(self, directory):
+        self.root = Path(directory).resolve()
+        try:
+            index = json.loads((self.root / 'index.json').read_text(encoding='utf-8'))
+            if not isinstance(index, dict):
+                raise ValueError('invalid index')
+        except (OSError, ValueError) as exc:
+            raise ImportFailure('Cannot read the converter cache index: ' + str(self.root)) from exc
+        self.paths = {}
+        for key, record in index.items():
+            if not re.fullmatch('[a-f0-9]{64}', key) or not isinstance(record, dict):
+                continue
+            parts = str(record.get('source', '')).replace('\\', '/').split('/')
+            sha = record.get('sha256', '')
+            if len(parts) < 3 or not re.fullmatch('[a-f0-9]{64}', str(sha)):
+                continue
+            pair = tuple(parts[-3:-1])
+            self.paths.setdefault(pair, []).append((key, sha))
+
+    def hint(self, book):
+        primary = book.get('primaryFile') or {}
+        parts = str(primary.get('fileSubPath') or '').replace('\\', '/').strip('/').split('/')
+        found = []
+        for n in range(1, len(parts)):
+            leaf = re.split(r' - Audio \d{2,} - ', parts[n], maxsplit=1)[0]
+            found.extend(self.paths.get((parts[n-1], leaf), []))
+        return found[0] if len(found) == 1 else None
+
+    def verify(self, hint, remote_metadata):
+        key, sha = hint
+        try:
+            raw = (self.root / (key + '.metadata.json')).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != sha:
+                raise ValueError('cache checksum mismatch')
+            local = json.loads(raw)['metadata']
+            def normalized(value):
+                result = dict(value)
+                for field in ('tags', 'categories', 'moods'):
+                    if field in result:
+                        result[field] = sorted(set(result[field]))
+                return result
+            if normalized(local) != normalized(remote_metadata):
+                raise ValueError('cache differs from the JSON visible to Grimmory; refresh/remount the view first')
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ImportFailure('Local sidecar verification failed: ' + str(exc)) from exc
 
 
 class NoRedirect(request.HTTPRedirectHandler):
@@ -100,6 +154,7 @@ def checkpoint(path, url, library):
             db.execute('CREATE TABLE IF NOT EXISTS target(url TEXT, library_id INTEGER)')
             db.execute('CREATE TABLE IF NOT EXISTS completed(book_id INTEGER PRIMARY KEY, digest TEXT, '
                        'title TEXT, imported_at TEXT)')
+            db.execute('CREATE TABLE IF NOT EXISTS source_tokens(book_id INTEGER PRIMARY KEY, token TEXT)')
             target = db.execute('SELECT url,library_id FROM target').fetchone()
             if target and target != (url, library['id']):
                 raise ImportFailure('This state file belongs to a different server/library. '
@@ -156,8 +211,9 @@ class Progress:
 
 
 def run(client, library_name, state, recheck=False, dry_run=False, book_ids=None,
-        limit=None, delay=0.1, max_errors=5, progress_seconds=5):
+        limit=None, delay=0.1, max_errors=5, progress_seconds=5, sidecar_cache=None):
     started = time.monotonic()
+    local = LocalSidecars(sidecar_cache) if sidecar_cache else None
     libraries = client.call('GET', '/api/v1/libraries')
     matches = [lib for lib in libraries if lib.get('name') == library_name]
     if len(matches) != 1:
@@ -177,8 +233,17 @@ def run(client, library_name, state, recheck=False, dry_run=False, book_ids=None
         books = [b for b in books if int(b['id']) in book_ids]
     with checkpoint(state, client.url, library) as db:
         completed = dict(db.execute('SELECT book_id,digest FROM completed'))
-        resumed = [b for b in books if int(b['id']) in completed and not recheck]
-        pending = [b for b in books if recheck or int(b['id']) not in completed]
+        tokens = dict(db.execute('SELECT book_id,token FROM source_tokens'))
+        hints = {int(b['id']): local.hint(b) for b in books} if local else {}
+        def can_resume(book):
+            bid = int(book['id'])
+            if bid not in completed:
+                return False
+            if local:
+                return bool(hints[bid] and tokens.get(bid) == hints[bid][1])
+            return not recheck
+        resumed = [b for b in books if can_resume(b)]
+        pending = [b for b in books if not can_resume(b)]
         if limit is not None:
             pending = pending[:limit]
         progress = Progress(len(resumed) + len(pending), started, progress_seconds)
@@ -197,8 +262,10 @@ def run(client, library_name, state, recheck=False, dry_run=False, book_ids=None
                     if not isinstance(sidecar, dict) or not isinstance(sidecar.get('metadata'), dict) or not sidecar['metadata']:
                         raise ImportFailure('Sidecar contains no metadata object.')
                     title = sidecar['metadata'].get('title') or title
-                    digest = hashlib.sha256(json.dumps(sidecar['metadata'], sort_keys=True,
-                                                     ensure_ascii=False).encode('utf-8')).hexdigest()
+                    hint = hints.get(bid)
+                    if hint:
+                        local.verify(hint, sidecar['metadata'])
+                    digest = metadata_digest(sidecar['metadata'])
                     if completed.get(bid) == digest:
                         progress.counts['unchanged'] += 1
                     elif dry_run:
@@ -213,6 +280,9 @@ def run(client, library_name, state, recheck=False, dry_run=False, book_ids=None
                         db.commit()
                         completed[bid] = digest
                         progress.counts['imported'] += 1
+                    if hint and not dry_run:
+                        db.execute('INSERT OR REPLACE INTO source_tokens VALUES(?,?)', (bid, hint[1]))
+                        db.commit()
                 except error.HTTPError as exc:
                     if exc.code in (401, 403):
                         raise ImportFailure('Authentication/access denied (HTTP %d).' % exc.code) from exc
@@ -246,6 +316,7 @@ def main():
     parser.add_argument('--library', default='Books', help='Exact library name')
     parser.add_argument('--state', default='grimmory-sidecar-import.sqlite3', help='Local resume database')
     parser.add_argument('--recheck', action='store_true', help='Recheck completed books; import only changed metadata')
+    parser.add_argument('--sidecar-cache', help='Local FUSE JSON cache: detect changes from its index without per-book API reads for unchanged successes')
     parser.add_argument('--dry-run', action='store_true', help='Read sidecars without importing or marking successes')
     parser.add_argument('--book-id', action='append', type=int, help='Restrict to a book ID; repeatable')
     parser.add_argument('--limit', type=int, help='Maximum pending books to process this run')
@@ -260,7 +331,8 @@ def main():
         password = os.environ.get('GRIMMORY_PASSWORD') or getpass.getpass('Grimmory password: ')
         client = Client(args.url, args.username, password, args.timeout)
         return run(client, args.library, args.state, args.recheck, args.dry_run,
-                   set(args.book_id or []), args.limit, args.delay, args.max_errors, args.progress_seconds)
+                   set(args.book_id or []), args.limit, args.delay, args.max_errors, args.progress_seconds,
+                   args.sidecar_cache)
     except KeyboardInterrupt:
         print('\nStopped. Completed books are saved; check server health before resuming an interrupted request.', file=sys.stderr)
         return 130
